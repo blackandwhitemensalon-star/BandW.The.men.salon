@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, inr, fmt } from "./shared.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
+import { API_BASE_URL, api, inr, fmt } from "./shared.js";
 import {
   ButtonLoader,
   ErrorAnimation,
@@ -29,26 +30,57 @@ export default function Customer() {
     [cancellingId, setCancellingId] = useState(""),
     [profileOpen, setProfileOpen] = useState(false),
     [historyFilter, setHistoryFilter] = useState("upcoming");
+  const [socketConnected, setSocketConnected] = useState(false);
+  const refreshInFlightRef = useRef(null);
   const [reviews, setReviews] = useState([]), [reviewAppt, setReviewAppt] = useState(null), [reviewThankYou, setReviewThankYou] = useState(false), [rating, setRating] = useState(0), [hover, setHover] = useState(0), [comment, setComment] = useState(""), [savingReview, setSavingReview] = useState(false);
   const historyAppointments = data.appointments.filter((appointment) =>
     historyFilter === "completed"
       ? appointment.status === "completed"
-      : ["pending", "confirmed"].includes(appointment.status),
+      : historyFilter === "cancelled"
+        ? ["cancelled", "rejected"].includes(appointment.status)
+        : ["pending", "confirmed"].includes(appointment.status),
   );
   const pendingConfirmedCount = data.appointments.filter((appointment) =>
     ["pending", "confirmed"].includes(appointment.status),
   ).length;
   const req = (p, o = {}) => api(p, o, token);
-  const refresh = async () => {
+  const refreshDashboard = useCallback(() => {
+    if (!token) return Promise.resolve();
+    if (refreshInFlightRef.current?.token === token) {
+      return refreshInFlightRef.current.promise;
+    }
+
+    const request = Promise.all([
+      req("/customers/me"),
+      req("/customers/me/appointments"),
+      req("/customers/me/reviews"),
+    ])
+      .then(([customer, appointments, customerReviews]) => {
+        if (localStorage.bwc !== token) return;
+        setUser(customer);
+        setData(appointments);
+        setReviews(customerReviews);
+      })
+      .catch((error) => {
+        if (error.message === "Unauthorized" && localStorage.bwc === token) {
+          localStorage.removeItem("bwc");
+          setToken("");
+          setUser(null);
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (refreshInFlightRef.current?.promise === request) {
+          refreshInFlightRef.current = null;
+        }
+      });
+
+    refreshInFlightRef.current = { token, promise: request };
+    return request;
+  }, [token]);
+  const refresh = useCallback(async () => {
     try {
-      const [customer, appointments, customerReviews] = await Promise.all([
-        req("/customers/me"),
-        req("/customers/me/appointments"),
-        req("/customers/me/reviews"),
-      ]);
-      setUser(customer);
-      setData(appointments);
-      setReviews(customerReviews);
+      await refreshDashboard();
     } catch (error) {
       if (error.message === "Unauthorized") {
         localStorage.removeItem("bwc");
@@ -58,7 +90,7 @@ export default function Customer() {
       }
       throw error;
     }
-  };
+  }, [token, refreshDashboard]);
   useEffect(() => {
     if (!token) {
       setAccountLoading(false);
@@ -78,7 +110,67 @@ export default function Customer() {
     return () => {
       active = false;
     };
-  }, [token]);
+  }, [token, refresh]);
+
+  useEffect(() => {
+    if (!token) {
+      setSocketConnected(false);
+      return undefined;
+    }
+
+    const socket = API_BASE_URL
+      ? io(API_BASE_URL, { auth: { token }, reconnection: true })
+      : io({ auth: { token }, reconnection: true });
+    const handleConnect = () => {
+      setSocketConnected(true);
+      refreshDashboard().catch(() => {});
+    };
+    const handleDisconnect = () => setSocketConnected(false);
+    const handleStatusUpdate = () => {
+      refreshDashboard().catch(() => {});
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("connect_error", handleDisconnect);
+    socket.on("customer:appointment-updated", handleStatusUpdate);
+    socket.on("customer:review-updated", handleStatusUpdate);
+    socket.on("customer:profile-updated", handleStatusUpdate);
+
+    return () => {
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("connect_error", handleDisconnect);
+      socket.off("customer:appointment-updated", handleStatusUpdate);
+      socket.off("customer:review-updated", handleStatusUpdate);
+      socket.off("customer:profile-updated", handleStatusUpdate);
+      socket.disconnect();
+    };
+  }, [token, refreshDashboard]);
+
+  useEffect(() => {
+    if (!token) return undefined;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshDashboard().catch(() => {});
+      }
+    };
+    const interval = window.setInterval(() => {
+      if (!socketConnected && document.visibilityState === "visible") {
+        refreshDashboard().catch(() => {});
+      }
+    }, 20000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("online", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("online", refreshWhenVisible);
+    };
+  }, [token, socketConnected, refreshDashboard]);
   const set = (k) => (e) =>
     setForm((current) => ({ ...current, [k]: e.target.value }));
   const dashboardUrl = () => {
@@ -391,6 +483,16 @@ export default function Customer() {
               >
                 Completed ({data.completed.length})
               </button>
+              <button
+                type="button"
+                className={`btn sm ${historyFilter === "cancelled" ? "" : "ghost"}`}
+                aria-pressed={historyFilter === "cancelled"}
+                onClick={() => setHistoryFilter("cancelled")}
+              >
+                Cancelled ({data.appointments.filter((appointment) =>
+                  ["cancelled", "rejected"].includes(appointment.status),
+                ).length})
+              </button>
             </div>
             {historyAppointments.map((a) => {
               const review=reviews.find(r=>r.appointmentId?._id===a._id);
@@ -422,7 +524,9 @@ export default function Customer() {
               <p>
                 {historyFilter === "completed"
                   ? "No completed appointments yet."
-                  : "No pending or confirmed appointments."}
+                  : historyFilter === "cancelled"
+                    ? "No cancelled appointments."
+                    : "No pending or confirmed appointments."}
               </p>
             )}
           </div>

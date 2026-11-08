@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, inr, fmt, D0, dirUrl, assetUrl } from "./shared.js";
 import {
   ButtonLoader,
@@ -59,6 +59,8 @@ export default function Admin() {
   const [galleryImages, setGalleryImages] = useState([]);
   const [galleryFiles, setGalleryFiles] = useState([]);
   const [galleryLoading, setGalleryLoading] = useState(false);
+  const loadInFlightRef = useRef(false);
+  const loadQueuedRef = useRef(false);
 
   useEffect(() => {
     if (!serviceFile) {
@@ -91,19 +93,34 @@ export default function Admin() {
   );
   const load = useCallback(() => {
     if (!token) return;
+    if (loadInFlightRef.current) {
+      loadQueuedRef.current = true;
+      return;
+    }
+    loadInFlightRef.current = true;
     const query = new URLSearchParams();
     if (date) query.set("date", date);
     if (search.trim()) query.set("search", search.trim());
-    call("/appointments" + (query.size ? "?" + query.toString() : ""))
-      .then(setAppointments)
-      .catch(() => {});
-    call("/services/all").then(setServices).catch(() => {});
-    call("/admin/reviews")
-      .then((result) => {
-        setReviews(result.reviews);
-        setReviewError("");
-      })
-      .catch((error) => setReviewError(error.message));
+    Promise.all([
+      call("/appointments" + (query.size ? "?" + query.toString() : ""))
+        .then(setAppointments)
+        .catch((error) => console.warn("Unable to refresh admin appointments:", error)),
+      call("/services/all")
+        .then(setServices)
+        .catch((error) => console.warn("Unable to refresh admin services:", error)),
+      call("/admin/reviews")
+        .then((result) => {
+          setReviews(result.reviews);
+          setReviewError("");
+        })
+        .catch((error) => setReviewError(error.message)),
+    ]).finally(() => {
+      loadInFlightRef.current = false;
+      if (loadQueuedRef.current) {
+        loadQueuedRef.current = false;
+        load();
+      }
+    });
   }, [token, date, search, call]);
 
   const loadGallery = useCallback(async () => {
@@ -142,14 +159,39 @@ export default function Admin() {
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 10000);
-    return () => clearInterval(interval);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    const refreshAppointments = () => load();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 20000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("salon:appointments-changed", refreshAppointments);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("salon:appointments-changed", refreshAppointments);
+    };
   }, [load]);
 
   useEffect(() => {
     if (!token || tab !== "users") return undefined;
     let active = true;
-    const timeout = setTimeout(() => {
+    let timeout;
+    let requestInFlight = false;
+    let refreshQueued = false;
+    const refreshCustomers = () => {
+      if (!active || document.visibilityState !== "visible") return;
+      window.clearTimeout(timeout);
+      timeout = window.setTimeout(() => {
+      if (requestInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      requestInFlight = true;
       setCustomersLoading(true);
       setCustomersError("");
       const query = new URLSearchParams();
@@ -165,12 +207,28 @@ export default function Admin() {
           if (active) setCustomersError(error.message);
         })
         .finally(() => {
+          requestInFlight = false;
           if (active) setCustomersLoading(false);
+          if (active && refreshQueued) {
+            refreshQueued = false;
+            refreshCustomers();
+          }
         });
-    }, 250);
+      }, 250);
+    };
+    refreshCustomers();
+    const interval = window.setInterval(refreshCustomers, 20000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshCustomers();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
     return () => {
       active = false;
-      clearTimeout(timeout);
+      window.clearTimeout(timeout);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
     };
   }, [token, tab, customerSearch, customerRefresh, call]);
 

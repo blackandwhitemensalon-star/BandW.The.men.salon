@@ -404,7 +404,10 @@ export default function useAdminNotifications(token) {
       ackInFlightRef.current.clear();
       setConnected(false);
     });
-    socket.on("appointment:new", item => receive(item, { isNew: true, showPopup: true }));
+    socket.on("appointment:new", item => {
+      receive(item, { isNew: true, showPopup: true });
+      window.dispatchEvent(new Event("salon:appointments-changed"));
+    });
     socket.on("appointment:updated", item => {
       persistItems(itemsRef.current.map(entry =>
         entry._id === item._id
@@ -416,6 +419,7 @@ export default function useAdminNotifications(token) {
         stopAlertForAppointment(item.appointmentId || item._id);
         acknowledgeNotification(item._id);
       }
+      window.dispatchEvent(new Event("salon:appointments-changed"));
     });
     socket.on("notifications:backlog", payload => {
       setSyncError("");

@@ -493,23 +493,42 @@ export function OffersPopup() {
 
   useEffect(() => {
     let cancelled = false;
+    let requestInFlight = false;
     let timer;
-    api("/offers/active")
-      .then((result) => {
+    const refresh = async (initial = false) => {
+      if (cancelled || requestInFlight || document.visibilityState !== "visible") return;
+      requestInFlight = true;
+      try {
+        const result = await api("/offers/active");
         if (cancelled) return;
         const eligible = result.filter(offerIsEligible);
-        if (!eligible.length) return;
         setOffers(eligible);
-        timer = setTimeout(() => {
-          if (!cancelled) setActive(true);
-        }, 900);
-      })
-      .catch((error) => {
+        if (initial && eligible.length) {
+          timer = setTimeout(() => {
+            if (!cancelled) setActive(true);
+          }, 900);
+        } else if (eligible.length) {
+          setActive(true);
+        }
+      } catch (error) {
         console.error("Unable to load salon offers:", error);
-      });
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    refresh(true);
+    const interval = window.setInterval(refresh, 20000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
     };
   }, []);
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
@@ -45,8 +45,41 @@ export const D0 = {
 
 export const useFetch = (path, initialValue) => {
   const [data, setData] = useState(initialValue);
+  const dataRef = useRef(data);
   useEffect(() => {
-    api(path).then(setData).catch(() => {});
+    let active = true;
+    let requestInFlight = false;
+    const refresh = async () => {
+      if (!active || requestInFlight || document.visibilityState !== "visible") {
+        return;
+      }
+      requestInFlight = true;
+      try {
+        const latest = await api(path);
+        if (active && JSON.stringify(dataRef.current) !== JSON.stringify(latest)) {
+          dataRef.current = latest;
+          setData(latest);
+        }
+      } catch (error) {
+        if (active) console.warn(`Unable to refresh ${path}:`, error);
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+
+    refresh();
+    const interval = window.setInterval(refresh, 20000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
   }, [path]);
   return data;
 };
