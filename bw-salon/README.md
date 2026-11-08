@@ -26,7 +26,9 @@ Set these in the backend hosting provider's secret/environment settings. Do not 
 | `ADMIN_USER` | Unique administrator username; do not use the development default. |
 | `ADMIN_PASS` | Strong private administrator password, at least 16 characters. |
 | `CLIENT_ORIGINS` | Comma-separated frontend origins, including scheme and host, with no trailing path. |
-| `UPLOAD_DIR` | Writable persistent disk path for gallery, service, and offer images. |
+| `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name. Required in production. |
+| `CLOUDINARY_API_KEY` | Cloudinary API key. Required in production. |
+| `CLOUDINARY_API_SECRET` | Private Cloudinary API secret. Required in production; never expose it to Vercel or the browser. |
 
 Set `VITE_API_BASE_URL` only in the frontend build environment when the API is on a different origin, for example `https://api.example.com`. It is a public URL, not a secret. Leave it unset when `/api`, `/uploads`, and `/socket.io` are routed through the frontend origin.
 
@@ -43,9 +45,11 @@ Set `VITE_API_BASE_URL` only in the frontend build environment when the API is o
 
 Create a dedicated database user with only the required application database permissions. Restrict Atlas network access to the backend host's egress IP where available; avoid opening access to all IP addresses. Back up the production database and verify the configured database name before starting the API. Startup creates required indexes and initializes settings/counters, but does not drop existing collections or records.
 
-### Uploaded image persistence
+### Cloudinary image storage
 
-The API writes uploaded images to `UPLOAD_DIR` and serves them under `/uploads`. Mount a persistent writable volume at that path before starting the backend. The default local `server/uploads` directory is suitable for development, not for an ephemeral production filesystem. Back up that volume as well as MongoDB because the database stores image paths, not image bytes.
+In production, gallery, service, and offer images are uploaded to Cloudinary. Create a Cloudinary account and set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend host's secret settings. All three are required together; production startup fails if they are missing. No Render disk or `UPLOAD_DIR` is needed. The API stores each image's secure Cloudinary URL in MongoDB and deletes replaced or removed Cloudinary images through the API. Local development can omit Cloudinary variables and stores images under `server/uploads`; that local fallback is not persistent on Render.
+
+Keep the Cloudinary API secret only on the backend. Use an account/API key with only the permissions needed, monitor storage and bandwidth usage, and back up your MongoDB database because it contains the image URLs.
 
 ### Pre-deployment checklist
 
@@ -55,6 +59,6 @@ The API writes uploaded images to `UPLOAD_DIR` and serves them under `/uploads`.
 - Build the frontend with the correct API URL configuration.
 - Verify `/api/health` reports a connected database and test customer/admin authentication, booking conflicts, notification reconnect/recovery, and upload/delete flows on a staging database.
 - Verify the static-host SPA rewrites, API routes, upload URLs, and Socket.IO WebSocket upgrade over HTTPS.
-- Confirm Atlas backups and persistent image-volume backups before opening the site to customers.
+- Confirm Atlas backups and Cloudinary account access/billing limits before opening the site to customers.
 
 The backend's dependency-free image-upload tests can be run with `npm test` in `server`.
